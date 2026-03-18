@@ -1,7 +1,81 @@
+# ------------------------------
+# Secrets / local env
+# ------------------------------
 .env
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
 .venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ------------------------------
+# Byte-compiled / optimized
+# ------------------------------
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# ------------------------------
+# Test / coverage / tooling caches
+# ------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.tox/
+.nox/
+
+# ------------------------------
+# Build / packaging
+# ------------------------------
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ------------------------------
+# Notebooks
+# ------------------------------
+.ipynb_checkpoints/
+
+# ------------------------------
+# Local outputs / generated artifacts
+# ------------------------------
+output/
+
+# ------------------------------
+# Common data / datasets (keep large files out of git)
+# ------------------------------
 *.csv
 *.tsv
 *.parquet
@@ -22,9 +96,9 @@ __pycache__/
 *.gz
 *.bz2
 *.xz
-output/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage/
+
+# ------------------------------
+# Notes
+# ------------------------------
+# UV: it is generally recommended to commit `uv.lock` for reproducible installs.
+# Do NOT add `uv.lock` here unless you explicitly want it untracked.
