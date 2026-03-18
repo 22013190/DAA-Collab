@@ -1,0 +1,252 @@
+Here’s the **full Copilot Sonnet build spec** you can paste straight into a `.txt` file (e.g., `analysis_agent_with_preprocessing.txt`) and hand to VS Code Copilot Sonnet 4.
+
+It’s written specifically for your **current codebase** (`langgraph_react_analysis_agent.py` + `fastmcp_server.py`) and will extend it — not rebuild from scratch.
+
+---
+
+````txt
+# PROJECT: Dynamic Data Analysis & Insights AI Agent (LLM-Driven Cognitive Graph with Preprocessing)
+
+## PURPOSE
+Enhance the existing LangGraph-based analysis agent so it automatically:
+1. Prepares any raw CSV for analysis (cleaning, typing, summarizing).
+2. Then performs reasoning, tool execution, reflection, and synthesis as before.
+
+Do **not** rewrite existing files unnecessarily.
+Add only the new preprocessing module and minimal edits to integrate it.
+
+---
+
+## EXISTING FILES
+- langgraph_react_analysis_agent.py  → core reasoning + execution logic
+- fastmcp_server.py                   → FastMCP data tools
+
+---
+
+## WHAT TO BUILD / MODIFY
+
+### 1️⃣  Create new file: `preprocess_node.py`
+Implements the PreprocessNode that runs before ReasoningNode.
+
+```python
+# preprocess_node.py
+from pydantic import BaseModel
+from langgraph.types import Node
+from fastmcp_client import FastMCPClient  # adjust import path if needed
+
+class PreparedDataset(BaseModel):
+    cleaned_path: str
+    schema_summary: dict
+    preprocessing_report: str
+    issues_detected: list[str]
+    fixes_applied: list[str]
+
+class PreprocessNode(Node):
+    def __init__(self, fastmcp: FastMCPClient):
+        self.fastmcp = fastmcp
+
+    def run(self, state):
+        csv_path = state.get("dataset_path")
+        issues, fixes = [], []
+
+        # 1. Validate CSV
+        validate = self.fastmcp.call_tool("validate_csv", {"file_path": csv_path})
+        issues.extend(validate.get("issues", []))
+
+        # 2. Infer schema
+        schema = self.fastmcp.call_tool("infer_schema", {"file_path": csv_path})
+
+        # 3. Handle missing values
+        cleaned = self.fastmcp.call_tool("handle_missing_values", {"file_path": csv_path})
+        fixes.append("handled_missing_values")
+
+        # 4. Handle outliers
+        outliers = self.fastmcp.call_tool("handle_outliers", {"file_path": cleaned["output_path"]})
+        fixes.append("handled_outliers")
+
+        # 5. Expand JSON columns
+        expanded = self.fastmcp.call_tool("expand_json_columns", {"file_path": outliers["output_path"]})
+        fixes.append("expanded_json_columns")
+
+        # 6. Summarize dataset
+        summary = self.fastmcp.call_tool("summarize_dataset", {"file_path": expanded["output_path"]})
+
+        prepared = PreparedDataset(
+            cleaned_path=expanded["output_path"],
+            schema_summary=schema,
+            preprocessing_report=summary["summary"],
+            issues_detected=issues,
+            fixes_applied=fixes,
+        )
+
+        # update graph state
+        state["prepared_dataset"] = prepared.dict()
+        state["dataset_path"] = prepared.cleaned_path
+        state["dataset_schema"] = prepared.schema_summary
+        return state
+````
+
+---
+
+### 2️⃣  Modify `langgraph_react_analysis_agent.py`
+
+Insert PreprocessNode into the existing LangGraph pipeline before ReasoningNode.
+
+```python
+from preprocess_node import PreprocessNode
+from fastmcp_client import FastMCPClient
+
+fastmcp = FastMCPClient("http://localhost:8000")  # adjust to your FastMCP server URL
+
+graph = Graph()
+
+graph.add_node("PreprocessNode", PreprocessNode(fastmcp))
+graph.add_node("ReasoningNode", ReasoningNode(llm, fastmcp))
+graph.add_node("ExecutionNode", ExecutionNode(fastmcp))
+graph.add_node("SynthesisNode", SynthesisNode(llm))
+
+graph.add_edge("PreprocessNode", "ReasoningNode")
+graph.add_edge("ReasoningNode", "ExecutionNode")
+graph.add_edge("ExecutionNode", "SynthesisNode")
+graph.set_entry_point("PreprocessNode")
+```
+
+No other changes to your reasoning or synthesis logic are required.
+
+---
+
+### 3️⃣  Extend `fastmcp_server.py`
+
+Add these two tools at the top of the file to fill your preprocessing gaps.
+
+```python
+@tool
+def validate_csv(file_path: str) -> dict:
+    """Check file readability and delimiter."""
+    import csv
+    issues = []
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            sample = f.read(10000)
+        csv.Sniffer().sniff(sample)
+    except Exception as e:
+        issues.append(str(e))
+    return {"status": "ok", "issues": issues}
+
+@tool
+def infer_schema(file_path: str) -> dict:
+    """Infer column types and sample statistics."""
+    import pandas as pd
+    df = pd.read_csv(file_path, nrows=5000)
+    schema = {col: str(df[col].dtype) for col in df.columns}
+    stats = df.describe(include="all").to_dict()
+    return {"schema": schema, "stats": stats}
+```
+
+You already have these tools:
+`handle_missing_values`, `handle_outliers`, `expand_json_columns`, and `summarize_dataset`.
+Keep using them as-is.
+
+---
+
+### 4️⃣  State additions
+
+In your graph’s state definition (if it exists), ensure keys:
+
+```
+dataset_path
+dataset_schema
+prepared_dataset
+```
+
+are included or dynamically allowed.
+
+---
+
+### 5️⃣  Data flow summary
+
+```
+START
+  ↓
+PreprocessNode
+  - validate_csv
+  - infer_schema
+  - handle_missing_values
+  - handle_outliers
+  - expand_json_columns
+  - summarize_dataset
+  ↓
+ReasoningNode  (LLM builds analytical plan using clean schema)
+  ↓
+ExecutionNode  (runs FastMCP tools from plan)
+  ↓
+ReflectionNode (optional if you already have it)
+  ↓
+SynthesisNode  (final insights)
+  ↓
+END
+```
+
+---
+
+### 6️⃣  Example reasoning context after preprocessing
+
+The ReasoningNode will now receive:
+
+```json
+{
+  "dataset_schema": {
+    "schema": {"age": "int64", "income": "float64"},
+    "stats": {"age": {"mean": 35.2}, "income": {"mean": 60000}}
+  },
+  "issues_detected": ["invalid delimiter found"],
+  "fixes_applied": ["handled_missing_values", "handled_outliers"]
+}
+```
+
+This lets the LLM reason intelligently:
+
+> “Because 10% of income values were imputed, correlations may be biased.”
+
+---
+
+### 7️⃣  Optional Enhancements (for later)
+
+* Add `detect_duplicates` and `normalize_text_columns` tools in FastMCP.
+* Let the PreprocessNode decide dynamically (via config or LLM prompt) which tools to apply.
+* Store a `preprocessing_summary.json` beside the cleaned file.
+
+---
+
+### 8️⃣  Deliverables for Copilot
+
+Copilot should:
+
+1. Create `preprocess_node.py` exactly as described.
+2. Update `langgraph_react_analysis_agent.py` with the new node and edges.
+3. Add `validate_csv` + `infer_schema` tools to `fastmcp_server.py`.
+4. Ensure imports, function calls, and URLs match the existing project layout.
+5. Test by running:
+
+   ```bash
+   python langgraph_react_analysis_agent.py --file sample.csv --query "Find correlation between age and income"
+   ```
+
+   Expected: preprocessing happens first, then normal reasoning/analysis.
+
+---
+
+## END OF SPEC
+
+This spec extends your current system — it does **not** replace or refactor existing logic.
+
+```
+
+---
+
+✅ Save that entire text as `analysis_agent_with_preprocessing.txt`  
+✅ Open it in VS Code → run **Copilot Sonnet 4**  
+✅ Tell it: *“Build exactly what’s described in this file.”*
+
+It will scaffold `preprocess_node.py`, patch your graph, and add the new FastMCP tools — all compatible with your current setup.
+```

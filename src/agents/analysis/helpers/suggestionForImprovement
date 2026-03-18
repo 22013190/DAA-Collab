@@ -1,0 +1,209 @@
+Perfect — you want a **ready-to-paste “build spec”** file for Copilot Sonnet 4 that describes exactly what to build (structure, goals, flow, tools, reasoning loop, etc.) so it can implement the full intelligent analysis agent for you.
+
+Here’s what you can paste directly into a `.txt` file and hand to Copilot Sonnet 4:
+
+---
+
+````txt
+# PROJECT: Dynamic Data Analysis & Insights AI Agent (LLM-Driven Cognitive Graph)
+
+## OVERVIEW
+You are building a LangGraph-based AI agent that performs autonomous data analysis and insight generation using reasoning, planning, reflection, and tool execution.  
+The agent must:
+- Take in a CSV file and a user query.
+- Use an LLM (Ollama / cloud LLM) for deep reasoning, planning, and synthesis.
+- Execute data tools hosted in a FastMCP server.
+- Iterate intelligently (reason → plan → act → reflect → refine → synthesize).
+- intelligently alter or maintain state and memory across iterations.
+- Output a final human-readable insight report.
+
+---
+
+## STACK
+- LangGraph (for reasoning-state flow)
+- LangChain (for LLM + tool integration)
+- FastMCP (data analysis and cleaning tools)
+- A2A SDK (optional for inter-agent communication)
+- Pydantic (for schemas and data validation)
+- Python 3.10+
+
+---
+
+## DESIGN OBJECTIVE
+Make full use of the LLM’s intelligence for reasoning and decision-making.  
+Do not minimize LLM calls — allow multi-round reasoning when useful.  
+Structure code so reasoning and execution are clearly separated but work together.
+
+---
+
+## CORE COMPONENTS
+
+### 1. **State Schema (Pydantic)**
+Define a global state model:
+```python
+class AnalysisState(BaseModel):
+    dataset_path: str
+    dataset_schema: dict | None = None
+    user_query: str
+    plan: dict | None = None
+    step_results: list = []
+    current_step: int = 0
+    reflections: list = []
+    final_report: str | None = None
+````
+
+---
+
+### 2. **LangGraph Nodes**
+
+#### Node: `ReasoningNode`
+
+* Role: generate or update the plan based on query and data context.
+* Input: user query, dataset schema, prior reflections.
+* Output: structured plan (JSON/Pydantic) with ordered steps.
+* Prompt: “You are an expert data analyst. Given the user query and dataset, design an ordered plan of analytical steps using available FastMCP tools.”
+
+#### Node: `ExecutionNode`
+
+* Role: execute the next plan step using FastMCP tools.
+* Input: current plan step and parameters.
+* Output: tool result (path, text summary, metrics).
+* Must call FastMCP tool via LangChain tool wrapper.
+
+#### Node: `ReflectionNode`
+
+* Role: evaluate tool result, compare to expected outcome.
+* Input: step result, plan expectations.
+* Output: decision (continue, re-run with changes, skip, revise plan).
+
+#### Node: `SynthesisNode`
+
+* Role: combine all results and reflections into a final insight report.
+* Output: short, natural language summary with data references.
+
+---
+
+### 3. **Graph Flow**
+
+**START → ReasoningNode → ExecutionNode → ReflectionNode → (loop) → SynthesisNode → END**
+
+Logic:
+
+1. ReasoningNode generates initial plan.
+2. ExecutionNode runs first step.
+3. ReflectionNode checks results:
+
+   * If incomplete or inconsistent → ReasoningNode again (refine plan).
+   * If all steps done → go to SynthesisNode.
+4. SynthesisNode compiles final report.
+
+LangGraph manages state transitions.
+Each node updates `AnalysisState` before returning.
+
+---
+
+### 4. **LLM Behavior**
+
+* Use `gpt-4-turbo`, `claude-3.5-sonnet`, or local `ollama:phi` model.
+* Use low temperature (0.3) for planning.
+* Use medium temperature (0.6) for reflection and synthesis.
+* Provide dataset schema, first rows, and available tool list in context for reasoning.
+* Keep prompts concise and use structured JSON outputs for plan and reflections.
+
+---
+
+### 5. **FastMCP Tool Integration**
+
+Expose at least these tools:
+
+* `analyze_schema(file_path)`
+* `handle_missing_values(file_path)`
+* `generate_plot(file_path, columns, kind)`
+* `perform_t_test(file_path, col1, col2)`
+* `perform_anova(file_path, group_col, value_col)`
+
+Each tool returns a Pydantic-compatible output with:
+
+```python
+class ToolResult(BaseModel):
+    tool: str
+    status: str
+    output_path: str | None
+    summary: str
+    metrics: dict | None
+```
+
+---
+
+### 6. **Memory + Context**
+
+* Store `AnalysisState` in LangGraph memory.
+* Persist intermediate results (e.g., cleaned dataset paths).
+* Allow reflection node to access previous results when reasoning about next actions.
+
+---
+
+### 7. **Final Output**
+
+A JSON object containing:
+
+```json
+{
+  "query": "original query",
+  "final_report": "summarized insights in text",
+  "plan": [...],
+  "step_results": [...],
+  "reflections": [...]
+}
+```
+
+---
+
+## OPTIONAL ENHANCEMENTS
+
+* Confidence scoring for each reasoning iteration.
+* Auto-plan optimization if too many tool failures occur.
+* Add natural language interface using A2A protocol for multi-agent queries.
+* Enable offline LLM fallback (Ollama) if API unavailable.
+
+---
+
+## BUILD STEPS FOR COPILOT
+
+1. Scaffold `analysis_agent/` folder.
+2. Create `state.py` for Pydantic models.
+3. Create `graph.py` to define LangGraph nodes and transitions.
+4. Create `nodes/` folder with `reasoning.py`, `execution.py`, `reflection.py`, `synthesis.py`.
+5. Integrate FastMCP client from existing `fastmcp_server.py`.
+6. Implement a main script `run_analysis_agent.py` that loads CSV + query → runs LangGraph → prints final report.
+7. Add simple CLI interface:
+
+   ```bash
+   python run_analysis_agent.py --file data.csv --query "Find correlation between sales and marketing spend"
+   ```
+
+---
+
+## GOAL FOR COPILOT
+
+Generate a modular, LLM-driven, reasoning-based LangGraph agent that:
+
+* Uses multiple reasoning rounds.
+* Executes FastMCP tools intelligently.
+* Reflects and adapts dynamically.
+* Outputs structured and natural-language insights.
+
+Code must be clean, modular, and use Pydantic for all schemas.
+
+---
+
+```
+
+---
+
+✅ Paste that entire block into a `.txt` file (e.g., `analysis_agent_build_spec.txt`)  
+✅ Open it in VS Code, feed it to **Copilot Sonnet 4**  
+✅ Tell it: “Build everything described in this spec.”  
+
+Would you like me to now generate a **second file** (Copilot prompt) optimized for *multi-file scaffolding* (telling Sonnet which files to create and in what order)? It improves Copilot’s adherence drastically.
+```
