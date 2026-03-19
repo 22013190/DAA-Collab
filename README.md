@@ -2,8 +2,6 @@
 
 WIP on agentic workflows between various specialised agents to produce charts, reports and dashboard.
 
-[Todos](./TODO.md) for a list of running tasks and improvements to be made.
-
 ## Installation & Setup
 
 This projects uses [uv](https://github.com/astral-sh/uv) for tooling, workflows and virtual environments.
@@ -32,7 +30,7 @@ Make sure env is set in your terminal instance correctly e.g. `source .venv/bin/
 
 ### Running Commands
 
-`uv run src/main.py` to start the instances
+`uv run .\src\agents\analysis\a2a_compliant_service.py` to start the a2a service and `uv run .\src\agents\analysis\helpers\a2a_client.py`
 
 `uv run` `...` to run specific python/pip package commands (similar to `pip run`)
 
