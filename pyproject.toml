@@ -44,8 +44,8 @@ dependencies = [
 
 [project.scripts]
 dashboard = "client.start_dashboard:main"
-db-agent = "src.agents.database.__main__:start_a2a_db_agent"
-supervisor-agent = "src.agents.planner.__main__:main"
+db-agent = "src.optional_entrypoints:start_db_agent"
+supervisor-agent = "src.optional_entrypoints:start_supervisor_agent"
 
 [project.optional-dependencies]
 agent-utils = [

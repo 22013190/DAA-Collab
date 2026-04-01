@@ -74,12 +74,10 @@ from structures.interfaces.a2a_schema import (
 )
 
 # Our analysis agent imports
-from src.agents.analysis.langgraph_react_analysis_agent import (
-    create_analysis_agent,
-)
-from src.agents.analysis.pipeline import (
-    create_analysis_pipeline_agent,
-)
+# The modular pipeline is the preferred implementation in this extracted repo.
+# Keep the legacy react agent optional so the service can import/run even when
+# legacy dependencies (or helper APIs) are not present.
+from src.agents.analysis.pipeline import create_analysis_pipeline_agent
 
 # Add current directory to Python path
 # current_dir = Path(__file__).parent
@@ -118,6 +116,16 @@ class A2AAnalysisAgentExecutor(AgentExecutor):
                 print("Modular analysis pipeline initialized")
         else:
             if not self.analysis_agent:
+                try:
+                    from src.agents.analysis.langgraph_react_analysis_agent import create_analysis_agent
+                except Exception as e:
+                    raise RuntimeError(
+                        "Legacy react analysis agent is not available. "
+                        "Set ANALYSIS_PIPELINE_ENABLED=true to use the modular pipeline, "
+                        "or include the legacy agent module and its compatible dependencies. "
+                        f"Original import error: {e}"
+                    ) from e
+
                 self.analysis_agent = await create_analysis_agent()
                 self.session_id = await self.analysis_agent.start_session()
                 print(f"Analysis agent initialized with session: {self.session_id}")
