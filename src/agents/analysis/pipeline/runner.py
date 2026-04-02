@@ -78,6 +78,54 @@ def _strip_think_blocks(text: str) -> str:
 
 
 class ModularAnalysisPipelineAgent:
+    @staticmethod
+    def _iter_a2a_data_parts(parts):
+        """Compatibility shim for A2A SDK variants.
+
+        Some a2a versions do not expose `a2a.utils.message.get_data_parts`.
+        This helper yields dict-like payload objects from `message.parts`.
+        """
+        try:
+            from a2a.utils.message import get_data_parts  # type: ignore
+
+            for obj in get_data_parts(parts):
+                yield obj
+            return
+        except Exception:
+            pass
+
+        for part in (parts or []):
+            if part is None:
+                continue
+            if isinstance(part, dict):
+                if isinstance(part.get("data"), dict):
+                    yield part.get("data")
+                else:
+                    yield part
+                continue
+            data = getattr(part, "data", None)
+            if isinstance(data, dict):
+                yield data
+                continue
+            if hasattr(part, "model_dump"):
+                try:
+                    dumped = part.model_dump()
+                    if isinstance(dumped, dict) and isinstance(dumped.get("data"), dict):
+                        yield dumped.get("data")
+                    elif isinstance(dumped, dict):
+                        yield dumped
+                except Exception:
+                    pass
+                continue
+            if hasattr(part, "dict"):
+                try:
+                    dumped = part.dict()
+                    if isinstance(dumped, dict) and isinstance(dumped.get("data"), dict):
+                        yield dumped.get("data")
+                    elif isinstance(dumped, dict):
+                        yield dumped
+                except Exception:
+                    pass
     """LangGraph wrapper that will coordinate planner, tools, and synthesis."""
 
     def __init__(
@@ -421,8 +469,13 @@ class ModularAnalysisPipelineAgent:
         graph.add_node("planner", self.planner)
         graph.add_node("execute_step", self.execute_step)
         graph.add_node("interpret_results", self.interpret_results)
+        graph.add_node("delegate_code_interpreter", self.delegate_code_interpreter)
         # NOTE: reflect returns Command with goto targets; provide ends for accurate graph rendering.
-        graph.add_node("reflect", self.reflect, ends=["planner", "execute_step", "interpret_results", "synthesis", END])
+        graph.add_node(
+            "reflect",
+            self.reflect,
+            ends=["planner", "execute_step", "interpret_results", "delegate_code_interpreter", "synthesis", END],
+        )
         graph.add_node("synthesis", self.synthesis)
         # Ensure report persistence always runs even if synthesis defers writing
         graph.add_node("persist_cleanup", self.persist_cleanup)
@@ -517,6 +570,27 @@ class ModularAnalysisPipelineAgent:
                 if remaining_steps > 0:
                     return "execute_step"
 
+                # PLACEHOLDER FOR INTEGRATION WITH CI
+                # Visualization-only: reflect() may route to delegate_code_interpreter when missing_info is non-actionable
+                # and/or _diagnose_tool_gap indicates a capability gap. We avoid duplicating full actionable filtering
+                # logic here (router must be deterministic and side-effect free), and instead use a conservative proxy.
+                try:
+                    delegation_enabled = str(os.getenv("ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION", "0")).lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    )
+                except Exception:
+                    delegation_enabled = False
+                if delegation_enabled and missing:
+                    try:
+                        max_delegations = int(os.getenv("ANALYSIS_MAX_CI_DELEGATIONS", "1"))
+                    except Exception:
+                        max_delegations = 1
+                    attempts = int(getattr(state, "delegation_attempts", 0) or 0)
+                    if attempts < max_delegations:
+                        return "delegate_code_interpreter"
+
                 # If still missing, replan until capped.
                 try:
                     max_refinements = int(os.getenv("ANALYSIS_MAX_REFINEMENTS", "2"))
@@ -551,6 +625,7 @@ class ModularAnalysisPipelineAgent:
                 "planner": "planner",
                 "execute_step": "execute_step",
                 "interpret_results": "interpret_results",
+                "delegate_code_interpreter": "delegate_code_interpreter",
                 "synthesis": "synthesis",
                 END: END,
             },
@@ -2765,6 +2840,474 @@ Return ONLY valid JSON (no markdown):
         # Always route through reflect; it decides whether to execute, replan, or synthesize.
         return Command(update=updates, goto="reflect")
 
+    async def delegate_code_interpreter(self, state: AnalysisPipelineState) -> Command:
+        """Delegate a capability-gap task to an external Code Interpreter (CI) graph.
+
+        PLACEHOLDER FOR INTEGRATION WITH CI
+        This node is intentionally implemented as a *parent-graph placeholder* so we can:
+        1) Route here from reflect() only when our current toolset cannot satisfy missing_info.
+        2) Build a stable payload contract for the child CI graph.
+        3) Append the child output as a tool-like event to tool_transcript so interpret_results()
+           can run a second grounded pass (substring evidence checks).
+
+        Child graph interface (TBD):
+        - Input payload (fixed/stable):
+          {instruction, missing_info, capability_gap, dataset_path, recent_tool_transcript_excerpt}
+        - Output payload (black box for now):
+          Must include at least `evidence_text: str`.
+          We may later extend this with `summary_text`, `artifacts`, `structured_results`, etc.
+        """
+
+        self._log_node("delegate_code_interpreter", state)
+
+        # PLACEHOLDER FOR INTEGRATION WITH CI
+        # Feature flag: keep behavior inert unless explicitly enabled.
+        try:
+            enabled = str(os.getenv("ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION", "0")).lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+        except Exception:
+            enabled = False
+
+        if not enabled:
+            evidence_text = (
+                "PLACEHOLDER FOR INTEGRATION WITH CI\n"
+                "Delegation feature flag ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION is disabled.\n"
+                "No child CI graph was invoked."
+            )
+            event = {
+                "tool": "delegate_code_interpreter",
+                "args": {"enabled": False},
+                "output": evidence_text[:4000],
+                "result": evidence_text[:4000],
+                "timestamp": datetime.now().isoformat(),
+                "status": "ok",
+                "why": "PLACEHOLDER FOR INTEGRATION WITH CI: feature disabled",
+                "placeholder": True,
+            }
+            return Command(
+                update={
+                    "tool_transcript": [event],
+                    "telemetry": {"delegation_calls": 1},
+                },
+                goto="interpret_results",
+            )
+
+        # --- Build child input payload (stable contract) ---
+        try:
+            missing_info = state.coverage.get("missing_info") if isinstance(state.coverage, dict) else []
+        except Exception:
+            missing_info = []
+        missing_info = [m for m in (missing_info or []) if isinstance(m, str) and m.strip()]
+
+        capability_gap = None
+        try:
+            capability_gap = getattr(state, "capability_gap", None)
+        except Exception:
+            capability_gap = None
+
+        # Compact transcript excerpt to prevent token bloat.
+        recent_excerpt: list[dict] = []
+        try:
+            transcript = list(state.tool_transcript or [])
+            # Prefer last successful events as context for CI.
+            ok_events = [(i, ev) for i, ev in enumerate(transcript) if isinstance(ev, dict) and ev.get("status") == "ok"]
+            # PLACEHOLDER FOR INTEGRATION WITH CI
+            # Keep this small and structured so it's safe to log/ship cross-graph.
+            for idx, ev in ok_events[-5:]:
+                recent_excerpt.append(
+                    {
+                        "line_index": idx,
+                        "tool": ev.get("tool"),
+                        "args": ev.get("args"),
+                        "output": (ev.get("output") or ev.get("result") or "")[:1200],
+                        "artifact": ev.get("raw_output_artifact") or ev.get("artifact"),
+                        "timestamp": ev.get("timestamp"),
+                    }
+                )
+        except Exception:
+            recent_excerpt = []
+
+        payload = {
+            "instruction": getattr(state, "instruction", "") or "",
+            "missing_info": missing_info,
+            "capability_gap": capability_gap,
+            "dataset_path": getattr(state, "dataset_path", "") or "",
+            "recent_tool_transcript_excerpt": recent_excerpt,
+        }
+
+        # --- Invoke child graph via subprocess (avoids `src` import collisions) ---
+        # PLACEHOLDER FOR INTEGRATION WITH CI (subprocess implementation)
+        # The child repo is executed in a separate Python process so it can safely import its own
+        # top-level `src` package without shadowing the parent's `src`.
+        import subprocess
+        import tempfile
+
+        def _find_child_root() -> Optional[Path]:
+            # 1) Explicit override
+            override = os.getenv("ANALYSIS_CODE_INTERPRETER_CHILD_ROOT")
+            if override:
+                p = Path(override).expanduser()
+                if p.exists():
+                    return p
+
+            # 2) Heuristic: locate DAA repo root from this file, then look for the sibling codeGen folder.
+            try:
+                here = Path(__file__).resolve()
+                daa_root = None
+                for parent in here.parents:
+                    if (parent / "pyproject.toml").exists() and (parent / "src").exists():
+                        daa_root = parent
+                        break
+                if daa_root is not None:
+                    candidate = daa_root.parent / "codeGen" / "MCP_Tool_Code_Interpreter_Generator"
+                    if candidate.exists():
+                        return candidate
+            except Exception:
+                pass
+
+            # 3) Fallback: common relative path from CWD
+            try:
+                candidate = Path.cwd().parent / "codeGen" / "MCP_Tool_Code_Interpreter_Generator"
+                if candidate.exists():
+                    return candidate
+            except Exception:
+                pass
+
+            return None
+
+        child_root = _find_child_root()
+        if child_root is None:
+            evidence_text = (
+                "PLACEHOLDER FOR INTEGRATION WITH CI\n"
+                "Subprocess mode enabled, but could not locate child repo root.\n"
+                "Set env ANALYSIS_CODE_INTERPRETER_CHILD_ROOT to: <path>/MCP_Tool_Code_Interpreter_Generator"
+            )
+            event = {
+                "tool": "delegate_code_interpreter",
+                "args": payload,
+                "output": evidence_text[:4000],
+                "result": evidence_text[:4000],
+                "timestamp": datetime.now().isoformat(),
+                "status": "error",
+                "why": "PLACEHOLDER FOR INTEGRATION WITH CI: child repo path missing",
+                "placeholder": True,
+            }
+            return Command(
+                update={
+                    "tool_transcript": [event],
+                    "errors": ["code_interpreter_child_root_not_found"],
+                    "telemetry": {"delegation_calls": 1},
+                },
+                goto="interpret_results",
+            )
+
+        runner = child_root / "integration" / "subprocess_runner.py"
+        if not runner.exists():
+            evidence_text = (
+                "PLACEHOLDER FOR INTEGRATION WITH CI\n"
+                "Child subprocess runner not found at integration/subprocess_runner.py.\n"
+                f"Expected: {str(runner)}"
+            )
+            event = {
+                "tool": "delegate_code_interpreter",
+                "args": payload,
+                "output": evidence_text[:4000],
+                "result": evidence_text[:4000],
+                "timestamp": datetime.now().isoformat(),
+                "status": "error",
+                "why": "PLACEHOLDER FOR INTEGRATION WITH CI: runner missing",
+                "placeholder": True,
+            }
+            return Command(
+                update={
+                    "tool_transcript": [event],
+                    "errors": ["code_interpreter_subprocess_runner_missing"],
+                    "telemetry": {"delegation_calls": 1},
+                },
+                goto="interpret_results",
+            )
+
+        # Build child initial state (mirrors codeGen/integration/mapper.py build_child_input)
+        # Always include the full parent instruction so the child can act end-to-end.
+        # Append missing_info as supplemental context when present.
+        base_instruction = payload.get("instruction") or ""
+        if missing_info:
+            child_query = base_instruction
+            if child_query:
+                child_query += "\n\n"
+            child_query += "Capability gaps / missing info:\n- " + "\n- ".join(missing_info)
+        else:
+            child_query = base_instruction
+        data_path = payload.get("dataset_path") or ""
+        try:
+            data_path = str(Path(data_path).expanduser().resolve()) if data_path else ""
+        except Exception:
+            data_path = str(data_path or "")
+
+        child_init: Dict[str, Any] = {
+            "user_query": child_query,
+            "data_path": data_path,
+            "extracted_intent": None,
+            "has_gap": False,
+            "matched_tool": None,
+            "tool_spec": None,
+            "generated_code": None,
+            "draft_path": None,
+            "validation_result": None,
+            "repair_attempts": 0,
+            "execution_output": None,
+            "draft_output_path": None,
+            "promoted_tool": None,
+            "errors": None,
+            "task_id": None,
+            "projected_tool_transcript": None,
+            "projected_artifact_log": None,
+            "projected_capability_gap": None,
+            "projected_errors": None,
+            "projected_warnings": None,
+            "projected_final_artifacts": None,
+            "messages": [],
+        }
+
+        # Timeout (seconds) for the child subprocess.
+        try:
+            timeout_sec = int(os.getenv("ANALYSIS_CI_SUBPROCESS_TIMEOUT_SEC", "300"))
+        except Exception:
+            timeout_sec = 300
+
+        # Run child process with isolated import path.
+        with tempfile.TemporaryDirectory(prefix="daa_ci_") as td:
+            tmpdir = Path(td)
+            in_path = tmpdir / "child_input.json"
+            out_path = tmpdir / "child_output.json"
+            in_path.write_text(json.dumps(child_init, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+            env = os.environ.copy()
+            # Ensure child repo root is on PYTHONPATH so it can import its own `src`.
+            env["PYTHONPATH"] = str(child_root)
+
+            # Default child sandbox mode to subprocess unless explicitly overridden.
+            # This avoids Docker assumptions during end-to-end runs.
+            env.setdefault("TOOLGEN_SANDBOX_MODE", "subprocess")
+
+            # Allow running the child in a dedicated venv to avoid dependency churn in the parent env.
+            child_python = os.getenv("ANALYSIS_CODE_INTERPRETER_PYTHON")
+            if not child_python:
+                try:
+                    # Prefer a local venv inside the child repo if present.
+                    candidates = [
+                        child_root / ".venv" / "Scripts" / "python.exe",  # Windows
+                        child_root / ".venv" / "bin" / "python",  # POSIX
+                        child_root / "venv" / "Scripts" / "python.exe",
+                        child_root / "venv" / "bin" / "python",
+                    ]
+                    for c in candidates:
+                        if c.exists():
+                            child_python = str(c)
+                            break
+                except Exception:
+                    child_python = None
+            child_python = child_python or sys.executable
+
+            cmd = [
+                str(child_python),
+                str(runner),
+                "--input",
+                str(in_path),
+                "--output",
+                str(out_path),
+            ]
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(child_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+            except subprocess.TimeoutExpired:
+                evidence_text = (
+                    "PLACEHOLDER FOR INTEGRATION WITH CI\n"
+                    f"Child tool-generator subprocess timed out after {timeout_sec}s."
+                )
+                event = {
+                    "tool": "delegate_code_interpreter",
+                    "args": payload,
+                    "output": evidence_text[:4000],
+                    "result": evidence_text[:4000],
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "error",
+                    "why": "PLACEHOLDER FOR INTEGRATION WITH CI: subprocess timeout",
+                    "placeholder": True,
+                }
+                return Command(
+                    update={
+                        "tool_transcript": [event],
+                        "errors": ["code_interpreter_subprocess_timeout"],
+                        "telemetry": {"delegation_calls": 1},
+                    },
+                    goto="interpret_results",
+                )
+
+            # Parse child output (prefer output file; include stderr in errors if missing)
+            child_payload: Dict[str, Any] = {}
+            try:
+                if out_path.exists():
+                    child_payload = json.loads(out_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                child_payload = {"ok": False, "error": f"child_output_parse_failed: {e}"}
+
+            child_ok = bool(child_payload.get("ok")) and proc.returncode == 0
+            projected_tt = child_payload.get("projected_tool_transcript") or []
+            projected_art = child_payload.get("projected_artifact_log") or []
+            projected_gap = child_payload.get("projected_capability_gap")
+            projected_errs = child_payload.get("projected_errors") or []
+            projected_warns = child_payload.get("projected_warnings") or []
+            projected_fa = child_payload.get("projected_final_artifacts") or {}
+
+            # Ensure projected transcript outputs are strings so interpret_results can consume them.
+            def _stringify(v: Any) -> str:
+                if v is None:
+                    return ""
+                if isinstance(v, str):
+                    return v
+                try:
+                    return json.dumps(v, ensure_ascii=False, default=str)
+                except Exception:
+                    return str(v)
+
+            stamped_tt: List[Dict[str, Any]] = []
+            now_iso = datetime.now().isoformat()
+            for ev in projected_tt:
+                if not isinstance(ev, dict):
+                    continue
+                out_val = ev.get("output")
+                out_text = _stringify(out_val)
+                stamped_tt.append(
+                    {
+                        "tool": str(ev.get("tool") or "ci_child"),
+                        "args": ev.get("args") or {},
+                        "output": out_text,
+                        "result": out_text,
+                        "timestamp": ev.get("timestamp") or now_iso,
+                        "status": ev.get("status") or "ok",
+                        "why": "CI subprocess: projected transcript",
+                        "source": "ci_subprocess",
+                    }
+                )
+
+            # Build an evidence_text summary from promoted output JSON (if present) so the next
+            # interpret_results pass has quotable substrings.
+            evidence_lines: List[str] = [
+                "PLACEHOLDER FOR INTEGRATION WITH CI (subprocess)",
+                f"child_ok={child_ok}",
+            ]
+            promoted_tool = None
+            try:
+                if isinstance(projected_fa, dict):
+                    promoted_tool = projected_fa.get("promoted_tool")
+            except Exception:
+                promoted_tool = None
+            if isinstance(promoted_tool, dict):
+                evidence_lines.append(f"promoted_tool_name={promoted_tool.get('name')}")
+                evidence_lines.append(f"promoted_tool_path={promoted_tool.get('path')}")
+                evidence_lines.append(f"promoted_output_path={promoted_tool.get('output_path')}")
+
+                op = promoted_tool.get("output_path")
+                if isinstance(op, str) and op:
+                    try:
+                        op_path = Path(op)
+                        if not op_path.is_absolute():
+                            op_path = child_root / op_path
+                        if op_path.exists():
+                            out_obj = json.loads(op_path.read_text(encoding="utf-8"))
+                            evidence_lines.append("output_json_preview=")
+                            if isinstance(out_obj, dict):
+                                # Emit up to 20 scalar-ish key/value pairs
+                                shown = 0
+                                for k, v in out_obj.items():
+                                    if shown >= 20:
+                                        break
+                                    # keep concise but quotable
+                                    evidence_lines.append(f"- {k}: {v}")
+                                    shown += 1
+                            else:
+                                evidence_lines.append(str(out_obj)[:1200])
+                    except Exception as _e:
+                        evidence_lines.append(f"output_json_read_failed: {_e}")
+
+            if proc.stdout:
+                evidence_lines.append("child_stdout_tail=")
+                evidence_lines.append(proc.stdout[-800:])
+            if proc.stderr:
+                evidence_lines.append("child_stderr_tail=")
+                evidence_lines.append(proc.stderr[-800:])
+
+            evidence_text = "\n".join([ln for ln in evidence_lines if ln is not None])
+
+            delegate_event = {
+                "tool": "delegate_code_interpreter",
+                "args": {
+                    **payload,
+                    "child_root": str(child_root),
+                    "timeout_sec": timeout_sec,
+                    "returncode": proc.returncode,
+                },
+                "output": evidence_text[:4000],
+                "result": evidence_text[:4000],
+                "timestamp": datetime.now().isoformat(),
+                "status": "ok" if child_ok else "error",
+                "why": "PLACEHOLDER FOR INTEGRATION WITH CI: ran tool-generator as subprocess",
+                "placeholder": True,
+            }
+
+            # Build LangGraph-safe updates.
+            updates: Dict[str, Any] = {
+                "telemetry": {"delegation_calls": 1},
+            }
+            if stamped_tt:
+                updates["tool_transcript"] = stamped_tt
+            # Always append the final delegate event last so it lands in the last-5 window.
+            updates.setdefault("tool_transcript", [])
+            updates["tool_transcript"].append(delegate_event)
+
+            if projected_art:
+                updates["artifact_log"] = [str(p) for p in projected_art if p]
+            if projected_warns:
+                updates["warnings"] = [str(w) for w in projected_warns if w]
+
+            # Include stderr/returncode as an error when the child failed.
+            if not child_ok:
+                err_lines = []
+                if child_payload.get("error"):
+                    err_lines.append(str(child_payload.get("error")))
+                if projected_errs:
+                    err_lines.extend([str(e) for e in projected_errs if e])
+                if proc.stderr:
+                    err_lines.append(f"child_stderr_tail: {proc.stderr[-400:]}")
+                if err_lines:
+                    updates["errors"] = err_lines[:50]
+            else:
+                # Even on success, propagate any warnings/errors emitted by the child.
+                if projected_errs:
+                    updates["errors"] = [str(e) for e in projected_errs if e]
+
+            # Replace-reducer fields
+            updates["capability_gap"] = projected_gap
+
+            if isinstance(projected_fa, dict) and projected_fa:
+                # Parent final_artifacts uses replace-latest dict; merge with existing first.
+                merged_fa = dict(state.final_artifacts or {})
+                merged_fa.update(projected_fa)
+                updates["final_artifacts"] = merged_fa
+
+            return Command(update=updates, goto="interpret_results")
+
     async def reflect(self, state: AnalysisPipelineState) -> Command:
         """Decide whether to synthesize or re-plan with refinement context.
 
@@ -2901,6 +3444,75 @@ Return ONLY valid JSON (no markdown):
         # Preserve the raw missing list for potential capability-gap diagnosis
         missing_raw: list[str] = list(missing) if isinstance(missing, list) else []
 
+        # Optional fallback: if the user explicitly requested generating/promoting a new tool,
+        # and we have not produced one, force a single delegation attempt even if the LLM
+        # coverage claims the query is answered.
+        try:
+            force_delegate = str(os.getenv("ANALYSIS_FORCE_DELEGATION_FOR_TOOL_REQUEST", "0")).lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+        except Exception:
+            force_delegate = False
+
+        if force_delegate:
+            try:
+                delegation_enabled = str(os.getenv("ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION", "0")).lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+            except Exception:
+                delegation_enabled = False
+            try:
+                max_delegations = int(os.getenv("ANALYSIS_MAX_CI_DELEGATIONS", "1"))
+            except Exception:
+                max_delegations = 1
+            try:
+                attempts = int(getattr(state, "delegation_attempts", 0) or 0)
+            except Exception:
+                attempts = 0
+
+            # The pipeline may rewrite/condense state.instruction during ingest. To preserve the
+            # original intent, also scan the most recent user message content.
+            parts: list[str] = []
+            try:
+                parts.append(str(getattr(state, "instruction", "") or ""))
+            except Exception:
+                pass
+            try:
+                msgs = list(getattr(state, "messages", []) or [])
+                if msgs:
+                    parts.append(str(getattr(msgs[-1], "content", "") or ""))
+            except Exception:
+                pass
+            instr = "\n".join([p for p in parts if p]).lower()
+            wants_tool = ("promote" in instr and "tool" in instr) or ("create" in instr and "tool" in instr)
+
+            has_promoted = False
+            try:
+                fa = getattr(state, "final_artifacts", None)
+                if isinstance(fa, dict) and isinstance(fa.get("promoted_tool"), dict):
+                    has_promoted = True
+            except Exception:
+                has_promoted = False
+
+            if delegation_enabled and wants_tool and (not has_promoted) and attempts < max_delegations:
+                forced_missing = [
+                    "Need code interpreter tool generation; current tools cannot create/promote new tool files"
+                ]
+                updates = {
+                    "finalize": False,
+                    "delegation_attempts": attempts + 1,
+                    "coverage": {"answers_query": False, "missing_info": forced_missing},
+                    "telemetry": {"delegation_rounds": 1, "delegation_forced": 1},
+                }
+                self._logger.info(
+                    f"reflect: forced delegation for tool request (attempt {attempts + 1}/{max_delegations})"
+                )
+                return Command(update=updates, goto="delegate_code_interpreter")
+
         # Enforce actionable missing_info policy to avoid vague replanning loops
         try:
             require_actionable = str(os.getenv("ANALYSIS_REQUIRE_ACTIONABLE_MISSING", "1")).lower() in ("1", "true", "yes")
@@ -2979,15 +3591,56 @@ Return ONLY valid JSON (no markdown):
                     explain_gaps = str(os.getenv("ANALYSIS_EXPLAIN_TOOL_GAPS", "1")).lower() in ("1", "true", "yes")
                 except Exception:
                     explain_gaps = True
-                updates: dict = {"finalize": True}
-                if explain_gaps and missing_raw:
+
+                # PLACEHOLDER FOR INTEGRATION WITH CI
+                # If enabled, delegate once to a CI graph to compute missing evidence not satisfiable
+                # via the current MCP toolset. The CI graph's output will be appended to tool_transcript
+                # as `evidence_text`, and we will route back to interpret_results for a second grounded pass.
+                try:
+                    delegation_enabled = str(os.getenv("ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION", "0")).lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    )
+                except Exception:
+                    delegation_enabled = False
+                try:
+                    max_delegations = int(os.getenv("ANALYSIS_MAX_CI_DELEGATIONS", "1"))
+                except Exception:
+                    max_delegations = 1
+                try:
+                    attempts = int(getattr(state, "delegation_attempts", 0) or 0)
+                except Exception:
+                    attempts = 0
+
+                # Compute capability-gap diagnosis if needed for delegation or for final reporting.
+                diag = None
+                if missing_raw and (explain_gaps or delegation_enabled):
                     try:
                         diag = await self._diagnose_tool_gap(state, missing_raw)
-                        updates["capability_gap"] = diag
-                        # Preserve missing_info for debug sidecars; we are finalizing anyway.
-                        updates["coverage"] = {"answers_query": False, "missing_info": missing_raw[:10]}
                     except Exception as _ge:
                         self._logger.warning(f"reflect: capability-gap diagnosis failed ({_ge})")
+
+                if delegation_enabled and missing_raw and attempts < max_delegations:
+                    updates: dict = {
+                        "finalize": False,
+                        "delegation_attempts": attempts + 1,
+                        # Preserve missing_info for debug sidecars and for CI payload.
+                        "coverage": {"answers_query": False, "missing_info": missing_raw[:10]},
+                        "telemetry": {"delegation_rounds": 1},
+                    }
+                    if isinstance(diag, dict) and diag:
+                        updates["capability_gap"] = diag
+                    self._logger.info(
+                        f"reflect: no actionable missing_info; delegating to CI (attempt {attempts + 1}/{max_delegations})"
+                    )
+                    return Command(update=updates, goto="delegate_code_interpreter")
+
+                # Fallback: original behavior (finalize to synthesis to avoid loops)
+                updates: dict = {"finalize": True}
+                if isinstance(diag, dict) and diag:
+                    updates["capability_gap"] = diag
+                    updates["coverage"] = {"answers_query": False, "missing_info": missing_raw[:10]}
                 self._logger.info("reflect: no actionable missing_info; finalizing to synthesis to avoid loops")
                 return Command(update=updates, goto="synthesis")
             else:
@@ -5624,12 +6277,11 @@ Begin your analysis by loading and exploring the dataset, then proceed autonomou
 
         try:
             message = request.params.message
-            from a2a.utils.message import get_data_parts
 
             dataset_path: Optional[str] = None
             instructions = "Perform comprehensive data analysis"
 
-            for data_obj in get_data_parts(message.parts):
+            for data_obj in self._iter_a2a_data_parts(message.parts):
                 if not isinstance(data_obj, dict):
                     continue
                 dataset_path = dataset_path or (
@@ -5781,13 +6433,12 @@ Begin your analysis by loading and exploring the dataset, then proceed autonomou
             await self.setup()
 
         message = request.params.message
-        from a2a.utils.message import get_data_parts
 
         dataset_path: Optional[str] = None
         instructions = "Perform comprehensive data analysis"
         resume_payload: Optional[Dict[str, Any]] = None
 
-        for data_obj in get_data_parts(message.parts):
+        for data_obj in self._iter_a2a_data_parts(message.parts):
             if not isinstance(data_obj, dict):
                 continue
 

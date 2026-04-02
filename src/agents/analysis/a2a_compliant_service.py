@@ -27,9 +27,11 @@ CODING STANDARDS FOR THIS FILE:
 
 
 import os
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -991,9 +993,66 @@ def main():
     print("=" * 80)
     print("")
 
+    # ---------------------------------------------------------------------
+    # End-to-end defaults (only set when missing)
+    # ---------------------------------------------------------------------
+    def _set_default_env(key: str, value: str) -> None:
+        try:
+            cur = os.getenv(key)
+            if cur is None or str(cur).strip() == "":
+                os.environ[key] = value
+        except Exception:
+            return
+
+    # Ensure the modular pipeline is used.
+    _set_default_env("ANALYSIS_PIPELINE_ENABLED", "true")
+
+    # Enable delegation by default for end-to-end validation.
+    _set_default_env("ANALYSIS_ENABLE_CODE_INTERPRETER_DELEGATION", "1")
+    _set_default_env("ANALYSIS_MAX_CI_DELEGATIONS", "1")
+    _set_default_env("ANALYSIS_FORCE_DELEGATION_FOR_TOOL_REQUEST", "1")
+    # Do not stop early just because the model claims it answered; allow refinement/delegation.
+    _set_default_env("ANALYSIS_END_ON_ANSWER", "0")
+
+    # Child graph defaults: prefer subprocess sandbox unless overridden.
+    _set_default_env("TOOLGEN_SANDBOX_MODE", "subprocess")
+
+    # Try to auto-locate the sibling codeGen repo and its local venv.
+    try:
+        service_file = Path(__file__).resolve()
+        daa_root = service_file.parents[3]  # .../DAA/src/agents/analysis/a2a_compliant_service.py
+        child_root = daa_root.parent / "codeGen" / "MCP_Tool_Code_Interpreter_Generator"
+        if child_root.exists():
+            _set_default_env("ANALYSIS_CODE_INTERPRETER_CHILD_ROOT", str(child_root))
+            child_py = child_root / ".venv" / "Scripts" / "python.exe"
+            if child_py.exists():
+                _set_default_env("ANALYSIS_CODE_INTERPRETER_PYTHON", str(child_py))
+    except Exception:
+        pass
+
     # Configuration
-    host = os.environ["AGENT_DOMAIN"]
-    port = int(os.environ["A2A_ANALYSIS_AGENT_PORT"])
+    host = os.getenv("AGENT_DOMAIN", "127.0.0.1")
+    port = int(os.getenv("A2A_ANALYSIS_AGENT_PORT", "10002"))
+
+    # Preflight: fail fast with a readable message if the port is already bound.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError as e:
+        # Windows: WinError 10048 is "only one usage of each socket address"
+        if getattr(e, "winerror", None) == 10048:
+            print("\nSTARTUP ERROR: Port is already in use")
+            print(f"Port {port} is already bound on {host}.")
+            print("Fix options:")
+            print("  - Stop the other process using that port")
+            print("  - Or pick a new port by setting A2A_ANALYSIS_AGENT_PORT")
+            print("Example (PowerShell):")
+            print("  $env:A2A_ANALYSIS_AGENT_PORT=10003; uv run src\\agents\\analysis\\a2a_compliant_service.py")
+            import sys
+
+            sys.exit(1)
+        raise
 
     # Create A2A server following tutorial pattern
     server, agent_card = create_a2a_server(host=host, port=port)

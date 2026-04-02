@@ -23,7 +23,7 @@ import re
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, List, Literal, Union, Dict, Any, Tuple
+from typing import Annotated, List, Literal, Union, Dict, Any, Tuple, Optional
 
 # Optimized matplotlib configuration
 import matplotlib
@@ -1082,19 +1082,31 @@ def perform_advanced_eda_on_csv(
 def analyze_csv_patterns(
     file_path: Annotated[str, Field(description="Path to the CSV file to analyze")],
     target_column: Annotated[
-        str,
+        Optional[str],
         Field(description="Name of the target column to analyze patterns for"),
     ] = None,
     value_column: Annotated[
-        str,
+        Optional[str],
         Field(
             description="Optional numeric value column for aggregation when target_column is categorical"
         ),
     ] = None,
     group_column: Annotated[
-        str,
+        Optional[str],
         Field(
             description="Optional grouping column (e.g., lighting condition) for comparing target patterns across groups"
+        ),
+    ] = None,
+    columns: Annotated[
+        Optional[list[str]],
+        Field(
+            description="Optional list of columns to restrict analysis to (planner hint). If provided, non-existent columns are ignored."
+        ),
+    ] = None,
+    analysis_purpose: Annotated[
+        Optional[str],
+        Field(
+            description="Optional analysis purpose hint (planner-only). This tool ignores it; included for compatibility."
         ),
     ] = None,
     top_n: Annotated[
@@ -1147,6 +1159,16 @@ def analyze_csv_patterns(
             return f"Error: File '{file_path}' does not exist."
 
         df = load_csv_data_cached(file_path)
+
+        # Compatibility: allow planner to pass a list of columns to analyze.
+        # If provided, restrict the dataframe to those columns (silently ignore unknown columns).
+        if columns and isinstance(columns, list):
+            try:
+                keep = [c for c in columns if isinstance(c, str) and c in df.columns]
+                if keep:
+                    df = df[keep]
+            except Exception:
+                pass
 
         patterns = ["## CSV Pattern Analysis"]
         patterns.append(f"- File: {file_path}")
