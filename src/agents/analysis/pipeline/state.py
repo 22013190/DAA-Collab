@@ -483,6 +483,15 @@ class AnalysisPipelineState(BaseModel):
             "from existing tool outputs (loop-capped)."
         ),
     )
+
+    delegation_attempts: Annotated[int, _replace_latest_int] = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Internal: number of times reflect routed to delegate_code_interpreter to fill a capability gap. "
+            "Capped to prevent reflect→delegate→interpret loops."
+        ),
+    )
     
     preprocess_profile: Annotated[Optional[Dict[str, Any]], _replace_latest_any] = Field(
         default=None,

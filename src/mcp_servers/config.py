@@ -1,5 +1,6 @@
 """Configurations stored here"""
 
+import importlib
 import sys
 
 # Keep imports optional so analysis-only extractions do not hard-require
@@ -11,8 +12,11 @@ except Exception:
 
 from mcp_servers.analysis import data_processing_server, fastmcp_server
 
+# Keep the database MCP server optional. It may not exist in analysis-only builds.
 try:
-    from mcp_servers.database import db_server
+    db_server = importlib.import_module("mcp_servers.database.db_server")
+except ModuleNotFoundError:
+    db_server = None
 except Exception:
     db_server = None
 
